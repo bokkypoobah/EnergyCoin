@@ -1,17 +1,16 @@
 /*
 file:   ZeroCarbonSeed.sol
-ver:    0.1.0
+ver:    0.2.0
 author: Darryl Morris
-date:   28-Aug-2017
+date:   21-Sep-2017
 email:  o0ragman0o AT gmail.com
 (c) Darryl Morris 2017
 
 A collated contract set for a token prefund specific to the requirments of
 Beond's ZeroCarbon green energy subsidy token.
 
-This presale token (ZCS) pegs generated tokens against ether 3:1 which gives
-holders 3x buying power over ether at the time of the NRG production token
-launch in 2018.
+This presale token (ZCS) pegs generated tokens against  USD at a rate of
+2000ZCS/$1  ($0.0005/NRG)
 
 Upon a successful NRG token ICO, ZCS token transfers are halted and tokens can
 only be migrated to the ZCS contract via an intercontract token transfer
@@ -34,7 +33,7 @@ to the future production royalties token at 1:1.
 |
 |
 |
-+-+- 1 Close 22 November 2017 || minted <= 1350
++-+- 1 Close 22 November 2017 || minted <= $500,000USD
 | +- Funds to round 1 fund wallet
 | +- 1% to commision wallt
 |
@@ -64,36 +63,39 @@ pragma solidity ^0.4.13;
 \*----------------------------------------------------------------------------*/
 
 // Contains token sale parameters
-contract ZeroCarbonSeedConfig
+contract ZCSTokenConfig
 {
     // ERC20 trade name and symbol
-    string public           name            = "ZeroCarbon Seed";
+    string public           name            = "Zero Carbon Seed";
     string public           symbol          = "ZCS";
 
     // Owner has power to abort, discount addresses, sweep successful funds,
     // change owner, sweep alien tokens.
-    address public          owner           = msg.sender; //0x0;
+    address public          owner           = msg.sender;
     
     // Fund wallet should also be audited prior to deployment
     // NOTE: Must be checksummed address!
-    address public          fundWallet      = msg.sender; //0x0;
-    // ICO developer commisions wallet (1% of funds raised)
-    address public          devWallet       = msg.sender; //0x0;
+    address public          fundWallet      = msg.sender;
+    // ICO developer commision wallet (2% of funds raised)
+    address public          devWallet       = msg.sender; // 0x0;
+    
+    // Developer commision divisor (1 of funds raised);
+    uint public constant    COMMISION_DIV   = 100;
 
-    // Token/Eth ratio
-    uint public constant    TOKENS_PER_ETH  = 3;
+    // ZCS per $1 USD at $0.0005/ZCS
+    uint public constant    ZCS_PER_USD     = 2000;
     
-    // USD per NRG in cents
-    uint public constant    CENTS_PER_NRG   = 150;
+    // USD/ETH Exchange Rate
+    uint public constant    USD_PER_ETH     = 200; // $200
     
-    // Minimum and maximum target in USD
-    uint public constant    MIN_ETH_FUND    = 675 * 1 ether; // ~$250,000
-    uint public constant    MAX_ETH_FUND    = 1350 * 1 ether; // ~$500,000
-    
-    // Funding begins on 1st November 2017
-    // `+ new Date('00:00 1 November 2017')/1000`
-    // uint public constant    START_DATE      = 1509458400;
-    uint public constant    START_DATE      = 1504143469;
+    // USD min and max caps
+    uint public constant    MIN_USD_FUND    = 250000; // $250,000
+    uint public constant    MAX_USD_FUND    = 500000; // $500,000
+
+    // Funding begins on 14th August 2017
+    // `+ new Date('14 August 2017 GMT+0')/1000`
+    // uint public constant    START_DATE      = 1502668800;
+    uint public START_DATE                  = now;
 
     // Period for fundraising
     uint public constant    FUNDING_PERIOD  = 21 days;
@@ -147,6 +149,7 @@ contract ReentryProtected
         _;
     }
 }
+
 
 contract ERC20Token
 {
@@ -257,6 +260,7 @@ contract ERC20Token
 }
 
 
+
 /*-----------------------------------------------------------------------------\
 
 ## Conditional Entry Table
@@ -270,9 +274,10 @@ Reentry mutex set in moveFundsToWallet(), refund()
 
 |function                |<START_DATE|<END_DATE |fundFailed  |fundSucceeded|icoSucceeded
 |------------------------|:---------:|:--------:|:----------:|:-----------:|:---------:|
-|()                      |F          |T         |F           |T            |F          |
+|()                      |KYC        |T         |F           |T            |F          |
 |abort()                 |T          |T         |T           |T            |F          |
-|proxyPurchase()         |F          |T         |F           |T            |F          |
+|proxyPurchase()         |KYC        |T         |F           |T            |F          |
+|addKycAddress()         |T          |T         |F           |T            |T          |
 |finaliseICO()           |F          |F         |F           |T            |T          |
 |refund()                |F          |F         |T           |F            |F          |
 |transfer()              |F          |F         |F           |F            |T          |
@@ -280,29 +285,19 @@ Reentry mutex set in moveFundsToWallet(), refund()
 |approve()               |F          |F         |F           |F            |T          |
 |changeOwner()           |T          |T         |T           |T            |T          |
 |acceptOwnership()       |T          |T         |T           |T            |T          |
-|changeUtlity()          |T          |T         |T           |T            |T          |
+|changeVeredictum()      |T          |T         |T           |T            |T          |
 |destroy()               |F          |F         |!__abortFuse|F            |F          |
 |transferAnyERC20Tokens()|T          |T         |T           |T            |T          |
 
 \*----------------------------------------------------------------------------*/
 
-contract ZeroCarbonSeedAbstract
+contract ZCSTokenAbstract
 {
 // TODO comment events
-    // Triggered when a refund is claimed
     event Refunded(address indexed _addr, uint indexed _value);
-    
-    // Triggered upon change of owner
     event ChangedOwner(address indexed _from, address indexed _to);
-    
-    // Triggered upon initiation a change of ownership
     event ChangeOwnerTo(address indexed _to);
-    
-    // Triggered upon ether leaving the contract
     event FundsTransferred(address indexed _wallet, uint indexed _value);
-    
-    // Triggered upon transferring tokens to the production contract.
-    event MigratedTo(address indexed _from, address indexed _to, uint indexed _amount);
 
     // This fuse blows upon calling abort() which forces a fail state
     bool public __abortFuse = true;
@@ -311,7 +306,7 @@ contract ZeroCarbonSeedAbstract
     // transfers and prevents abort()
     bool public icoSuccessful;
     
-    // Set to true by NRG ICO contract upon finalisation
+    // Is set to open migration of ZCS tokens to the NRG contract
     bool public mustMigrate;
 
     // Token conversion factors are calculated with decimal places at parity with ether
@@ -320,8 +315,8 @@ contract ZeroCarbonSeedAbstract
     // An address authorised to take ownership
     address public newOwner;
     
-    // The future NRG production token address
-    address public nrgAddr;
+    // The Veredictum smart contract address
+    address public nrgContract;
     
     // Total ether raised during funding
     uint public etherRaised;
@@ -334,7 +329,16 @@ contract ZeroCarbonSeedAbstract
     
     // Return `true` if MIN_FUNDS were not raised before END_DATE
     function fundFailed() public constant returns (bool);
+
+    // Returns USD raised for set ETH/USD rate
+    function usdRaised() public constant returns (uint);
+
+    // Returns an amount in eth equivilent to USD at the set rate
+    function usdToEth(uint) public constant returns(uint);
     
+    // Returns the USD value of ether at the set USD/ETH rate
+    function ethToUsd(uint _wei) public constant returns (uint);
+
     // Returns token/ether conversion given ether value and address. 
     function ethToTokens(uint _eth)
         public constant returns (uint);
@@ -344,12 +348,6 @@ contract ZeroCarbonSeedAbstract
 
     // Owner can move funds of successful fund to fundWallet 
     function finaliseICO() public returns (bool);
-
-    // Called by NRG contract to halt transfers and open migration.
-    function setMigrate() public returns (bool);
-
-    // To migrate ZCS tokens to NRG tokens
-    function migrate(address _addr) public returns (bool);
     
     // Refund on failed or aborted sale 
     function refund(address _addr) public returns (bool);
@@ -357,26 +355,30 @@ contract ZeroCarbonSeedAbstract
     // To cancel token sale prior to START_DATE
     function abort() public returns (bool);
     
-    // Change the Veredictum backend contract address
-    function setNRG(address _addr) public returns (bool);
+    // Change the NRG production contract address
+    function setNrgContract(address _addr) public returns (bool);
+    
+    // Called by NRG contract upon finalizeICO()
+    function setMigrate() public returns (bool);
     
     // For owner to salvage tokens sent to contract
-    function transferAnyERC20Token(address tokenAddress, uint amount)
+    function transferExternalTokens(
+        address _kAddress, address _to, uint _amount)
         returns (bool);
 }
 
 
 /*-----------------------------------------------------------------------------\
 
-ZeroCarbonSeed token implimentation
+ Zero Carbon Seed token implimentation
 
 \*----------------------------------------------------------------------------*/
 
-contract ZeroCarbonSeedToken is 
+contract ZCSToken is 
     ReentryProtected,
     ERC20Token,
-    ZeroCarbonSeedAbstract,
-    ZeroCarbonSeedConfig
+    ZCSTokenAbstract,
+    ZCSTokenConfig
 {
     using SafeMath for uint;
 
@@ -384,10 +386,12 @@ contract ZeroCarbonSeedToken is
 // Constants
 //
 
+    uint public constant TOKENS_PER_ETH = ZCS_PER_USD * USD_PER_ETH;
+    uint public constant MIN_ETH_FUND   = 1 ether * MIN_USD_FUND / USD_PER_ETH;
+    uint public constant MAX_ETH_FUND   = 1 ether * MAX_USD_FUND / USD_PER_ETH;
+
     // General funding opens LEAD_IN_PERIOD after deployment (timestamps can't be constant)
-    uint public END_DATE = START_DATE + FUNDING_PERIOD;
-    
-    uint public MAX_TOKENS = MAX_ETH_FUND * TOKENS_PER_ETH;
+    uint public END_DATE  = START_DATE + FUNDING_PERIOD;
 
 //
 // Modifiers
@@ -403,7 +407,7 @@ contract ZeroCarbonSeedToken is
 //
 
     // Constructor
-    function ZeroCarbonSeedToken()
+    function ZCSToken()
     {
         // ICO parameters are set in VentanaTSConfig
         // Invalid configuration catching here
@@ -411,10 +415,10 @@ contract ZeroCarbonSeedToken is
         require(bytes(name).length > 0);
         require(owner != 0x0);
         require(fundWallet != 0x0);
-        require(devWallet != 0x0);
-        require(TOKENS_PER_ETH > 0);
-        require(MIN_ETH_FUND > 0);
-        require(MAX_ETH_FUND > MIN_ETH_FUND);
+        require(ZCS_PER_USD > 0);
+        require(USD_PER_ETH > 0);
+        require(MIN_USD_FUND > 0);
+        require(MAX_USD_FUND > MIN_USD_FUND);
         require(START_DATE > 0);
         require(FUNDING_PERIOD > 0);
     }
@@ -446,19 +450,28 @@ contract ZeroCarbonSeedToken is
             && etherRaised >= MIN_ETH_FUND;
     }
 
+    // Returns the USD value of ether at the set USD/ETH rate
+    function ethToUsd(uint _wei) public constant returns (uint)
+    {
+        return USD_PER_ETH.mul(_wei).div(1 ether);
+    }
+    
+    // Returns the ether value of USD at the set USD/ETH rate
+    function usdToEth(uint _usd) public constant returns (uint)
+    {
+        return _usd.mul(1 ether).div(USD_PER_ETH);
+    }
+    
+    // Returns the USD value of ether raised at the set USD/ETH rate
+    function usdRaised() public constant returns (uint)
+    {
+        return ethToUsd(etherRaised);
+    }
+    
     // Returns the number of tokens for given amount of ether for an address 
     function ethToTokens(uint _wei) public constant returns (uint)
     {
         return _wei.mul(TOKENS_PER_ETH);
-    }
-    
-    // Returns calculated NRG tokens for given USD rate
-    function balanceOfNRG(address _addr, uint _centsPerEth)
-        public
-        constant
-        returns (uint nrg_)
-    {
-        nrg_ = balances[_addr] * _centsPerEth / CENTS_PER_NRG;
     }
 
 //
@@ -522,11 +535,14 @@ contract ZeroCarbonSeedToken is
 
         icoSuccessful = true;
 
-        FundsTransferred(devWallet, this.balance / 100);
-        devWallet.transfer(this.balance / 100);
+        // Send commision to developer wallet
+        FundsTransferred(devWallet, this.balance / COMMISION_DIV);
+        devWallet.transfer(this.balance / COMMISION_DIV);
         
+        // Send remaining funds to fundWallet
         FundsTransferred(fundWallet, this.balance);
         fundWallet.transfer(this.balance);
+        
         return true;
     }
     
@@ -542,7 +558,8 @@ contract ZeroCarbonSeedToken is
 
         // Transfer tokens back to origin
         // (Not really necessary but looking for graceful exit)
-        xfer(_addr, fundWallet, balances[_addr]);
+        totalSupply = totalSupply.sub(balances[_addr]);
+        xfer(_addr, 0x0, balances[_addr]);
 
         // garbage collect
         delete etherContributed[_addr];
@@ -553,44 +570,38 @@ contract ZeroCarbonSeedToken is
         }
         return true;
     }
-    
-    // Migrates all tokens from an address to NRG contract tokens
-    function migrate(address _addr)
-        public
-        returns (bool)
-    {
-        return transfer(nrgAddr, balances[_addr]);
-    }
 
 //
 // ERC20 overloaded functions
 //
 
-    function xfer(address _from, address _to, uint _amount)
-        internal
+    function transfer(address _to, uint _amount)
+        public
         preventReentry
         returns (bool)
     {
         // ICO must be successful
         require(icoSuccessful);
-        require(_amount <= balances[_from]);
+        super.transfer(_to, _amount);
 
-        Transfer(_from, _to, _amount);
-        
-        // avoid wasting gas on 0 token transfers
-        if(_amount == 0) return true;
-        
-        balances[_from] = balances[_from].sub(_amount);
-        balances[_to]   = balances[_to].add(_amount);
+        if (_to == nrgContract)
+            require(mustMigrate);
+            require(ERC20Token(nrgContract).transfer(msg.sender, _amount));
+        return true;
+    }
 
-        if (mustMigrate)
-        {
-            // intercontract token sender transfer. Any non-zero amount will
-            // migrate entire balance
-            require(_to == nrgAddr);
-            require(ERC20Token(nrgAddr).transfer(_from, balances[_from]));
-            MigratedTo(_from, nrgAddr, _amount);
-        }        
+    function transferFrom(address _from, address _to, uint _amount)
+        public
+        preventReentry
+        returns (bool)
+    {
+        // ICO must be successful
+        require(icoSuccessful);
+        super.transferFrom(_from, _to, _amount);
+
+        if (_to == nrgContract)
+            require(mustMigrate);
+            require(ERC20Token(nrgContract).transfer(_from, _amount));
         return true;
     }
     
@@ -635,16 +646,17 @@ contract ZeroCarbonSeedToken is
 
     // Change the address of the Veredictum contract address. The contract
     // must impliment the `Notify` interface.
-    function setNRG(address _kAddr)
+    function setNrgContract(address _kAddr)
         public
         noReentry
         onlyOwner
         returns (bool)
     {
-        nrgAddr = _kAddr;
+        nrgContract = _kAddr;
         return true;
     }
-    
+
+// TODO: need token shutdown strategy which does not lock tokens in exchanges  
     // NRG contract opens migration when it's ICO is finalized.
     // If NRG ICO fails, ZCS tokens remain indefinately transferrable
     // speculation zombies.
@@ -653,7 +665,7 @@ contract ZeroCarbonSeedToken is
         noReentry
         returns (bool)
     {
-        require(msg.sender == nrgAddr);
+        require(msg.sender == nrgContract);
         mustMigrate = true;
         return true;
     }
@@ -670,16 +682,17 @@ contract ZeroCarbonSeedToken is
     }
     
     // Owner can salvage ERC20 tokens that may have been sent to the account
-    function transferAnyERC20Token(address _kAddr, uint _amount)
+    function transferExternalTokens(address _kAddr, address _to, uint _amount)
         public
         onlyOwner
         preventReentry
         returns (bool) 
     {
-        require(ERC20Token(_kAddr).transfer(owner, _amount));
+        require(ERC20Token(_kAddr).transfer(_to, _amount));
         return true;
     }
 }
+
 
 
 // To test intercontract ZCS to NRG token migration/conversion
@@ -692,12 +705,12 @@ contract NRGTestRig is ERC20Token
     event MigratedFrom(
         address indexed _from,
         address indexed _to,
-        uint indexed _amount,
-        uint rate,
-        uint nrg);
+        uint indexed _amount);
     
-    // USD per NRG in cents during ICO
-    uint public constant ICO_CENTS_PER_NRG = 150;
+    uint public totalSupply = 5000000000 * 1e18;
+    
+    // NRG Per USD
+    uint public constant NRG_PER_USD = 667;
     
     // TODO: Use oracle to get rate for production contract
     uint public rate = 30000;
@@ -705,13 +718,23 @@ contract NRGTestRig is ERC20Token
     // TODO: Needs to be hard coded parameter in production contract
     address public zcsAddr;
     
-    // TODO: Remove in production contract 
-    function setZCSAddr(address _kAddr) { zcsAddr = _kAddr; }
+    // TODO: zcsAddr needs to be hard coded parameter
+    function NRGTestRig(address _zcsAddr)
+    {
+        zcsAddr = ERC20Token(_zcsAddr);
+        uint zcsSupply = ERC20Token(zcsAddr).totalSupply();
+        totalSupply = 5000000000 * 1e18;
+        balances[zcsAddr] = zcsSupply;
+        Transfer(0x0, this, totalSupply);
 
+        balances[this] = totalSupply - zcsSupply;
+        Transfer(0x0, this, totalSupply - zcsSupply);
+    }
+    
     // Opens migration of tokens to NRG contract tokens
     function finalizeICO() public returns (bool)
     {
-        return ZeroCarbonSeedAbstract(zcsAddr).setMigrate();
+        return ZCSTokenAbstract(zcsAddr).setMigrate();
     }
     
 //
@@ -725,21 +748,13 @@ contract NRGTestRig is ERC20Token
         // avoid wasting gas on 0 token transfers
         if(_amount == 0) return true;
         
-        if (msg.sender == zcsAddr) {
-            // Intercontract token reciever mints NRG from ZCS
-            require(rate != 0);
-            uint nrg = _amount * rate / ICO_CENTS_PER_NRG;
-            balances[_to] = balances[_to].add(nrg);
-            totalSupply = totalSupply.add(nrg);            
-            MigratedFrom(zcsAddr, _to, _amount, rate, nrg);
-            Transfer(zcsAddr, _to, nrg);
-        } else {
-            // Normal transfer
-            require(_amount <= balances[_from]);
-            balances[_from] = balances[_from].sub(_amount);
-            balances[_to]   = balances[_to].add(_amount);
-        }
-        
+        if (msg.sender == zcsAddr)
+            MigratedFrom(zcsAddr, _to, _amount);
+        // Normal transfer
+        require(_amount <= balances[_from]);
+        balances[_from] = balances[_from].sub(_amount);
+        balances[_to]   = balances[_to].add(_amount);
+
         Transfer(_from, _to, _amount);
         return true;
     }
