@@ -1,8 +1,8 @@
 /*
 file:   ZeroCarbonSeed.sol
-ver:    0.2.0
+ver:    0.2.1
 author: Darryl Morris
-date:   21-Sep-2017
+date:   22-Sep-2017
 email:  o0ragman0o AT gmail.com
 (c) Darryl Morris 2017
 
@@ -24,28 +24,46 @@ See MIT Licence for further details.
 
 Release Notes
 -------------
-0.1.0
+0.2.1
 
-1350 ether being raised at 3:1 token ratio.  These tokens will be transferable
-to the future production royalties token at 1:1.
+* Proofed out migration protocol
 
-+-+- Opens 1 November 2017. 3x tokens
+Migration process
+-----------------
+1. ZCS ICO succeeds
+2. NRG contract is deployed with `zcsContract` as precompiled constant;
+   Constructor sets balanceOf(<zcsContract>) = zcsContract.totalSupply();
+3. ZCSToken.setNrgContract(<nrgContract>) is call by owner.
+4. Audit that ZCSToken.nrgContract() is equal to actual NRGToken address
+5. NRGToken.finalizeICO() is called by owner after fundSucceeded == true
+5.1 NRGToken.finalizeICO() calls ZCSToken.setMigrate()
+6. Holders call ZCSToken.transfer(<nrgContract>, amount)
+6.1 ZCSToken.transfer() calls NRGToken.transfer(<holderAddr>, amount)
+8. Holders check NRGToken.balanceOf(<holderAddr>) to confirm migration
+
+Trust Relationship
+------------------
+* Holders must trust owner to provide and set a viable NRG contract address
+
+Timeline
+--------
++-+- ZCS Opens November 2017. 2000 ZCS tokens / USD
 |
 |
 |
-+-+- 1 Close 22 November 2017 || minted <= $500,000USD
++-+- 1 Close <=21 days after open || minted <= $500,000USD
 | +- Funds to round 1 fund wallet
-| +- 1% to commision wallt
+| +- 1% to commision wallet
 |
-+-+- Round 2. Production token. Open 8th January 2018. 1x tokens
++-+- Round 2. NRG Production token. Opens TBD 2018. 667 tokens / USD
 | +- mint 10,000,000 tokens to Beond wallets
-| +- Transfer round 1 tokens at 3:1
 |
 |
 +-+- Round 2 Close 6th February 2018 || minted <= 4,000,000
 | +- Funds to round 2 fund wallet
 | +- 1% to commission wallet
 | +- Open trading
+| +- Migrate ZCS tokens at 1:1
 |
 +--- < 4 years 4x coin mint / MWh
 |
@@ -54,7 +72,7 @@ to the future production royalties token at 1:1.
 */
 
 
-pragma solidity ^0.4.13;
+pragma solidity 0.4.13;
 
 /*-----------------------------------------------------------------------------\
 
@@ -70,16 +88,16 @@ contract ZCSTokenConfig
     string public           symbol          = "ZCS";
 
     // Owner has power to abort, discount addresses, sweep successful funds,
-    // change owner, sweep alien tokens.
+    // change owner, sweep alien tokens, set NRG contract address
     address public          owner           = msg.sender;
     
     // Fund wallet should also be audited prior to deployment
     // NOTE: Must be checksummed address!
     address public          fundWallet      = msg.sender;
-    // ICO developer commision wallet (2% of funds raised)
+    // ICO developer commision wallet (1% of funds raised)
     address public          devWallet       = msg.sender; // 0x0;
     
-    // Developer commision divisor (1 of funds raised);
+    // Developer commision divisor (1% of funds raised);
     uint public constant    COMMISION_DIV   = 100;
 
     // ZCS per $1 USD at $0.0005/ZCS
@@ -99,31 +117,33 @@ contract ZCSTokenConfig
 
     // Period for fundraising
     uint public constant    FUNDING_PERIOD  = 21 days;
+    
+    // TODO: Add premint addresses and balances
 }
 
 
 library SafeMath
 {
     // a add to b
-    function add(uint a, uint b) internal returns (uint c) {
+    function add(uint a, uint b) internal constant returns (uint c) {
         c = a + b;
         assert(c >= a);
     }
     
     // a subtract b
-    function sub(uint a, uint b) internal returns (uint c) {
+    function sub(uint a, uint b) internal constant returns (uint c) {
         c = a - b;
         assert(c <= a);
     }
     
     // a multiplied by b
-    function mul(uint a, uint b) internal returns (uint c) {
+    function mul(uint a, uint b) internal constant returns (uint c) {
         c = a * b;
         assert(a == 0 || c / a == b);
     }
     
     // a divided by b
-    function div(uint a, uint b) internal returns (uint c) {
+    function div(uint a, uint b) internal constant returns (uint c) {
         c = a / b;
         // No assert required as no overflows are posible.
     }
@@ -277,7 +297,6 @@ Reentry mutex set in moveFundsToWallet(), refund()
 |()                      |KYC        |T         |F           |T            |F          |
 |abort()                 |T          |T         |T           |T            |F          |
 |proxyPurchase()         |KYC        |T         |F           |T            |F          |
-|addKycAddress()         |T          |T         |F           |T            |T          |
 |finaliseICO()           |F          |F         |F           |T            |T          |
 |refund()                |F          |F         |T           |F            |F          |
 |transfer()              |F          |F         |F           |F            |T          |
@@ -285,18 +304,25 @@ Reentry mutex set in moveFundsToWallet(), refund()
 |approve()               |F          |F         |F           |F            |T          |
 |changeOwner()           |T          |T         |T           |T            |T          |
 |acceptOwnership()       |T          |T         |T           |T            |T          |
-|changeVeredictum()      |T          |T         |T           |T            |T          |
+|setNrgContract()        |T          |T         |T           |T            |T          |
+|setMigrate()            |F          |F         |F           |F            |!canMigrate|
 |destroy()               |F          |F         |!__abortFuse|F            |F          |
-|transferAnyERC20Tokens()|T          |T         |T           |T            |T          |
+|transferExternalTokens()|T          |T         |T           |T            |T          |
 
 \*----------------------------------------------------------------------------*/
 
 contract ZCSTokenAbstract
 {
-// TODO comment events
+    // Logged upon refund
     event Refunded(address indexed _addr, uint indexed _value);
+    
+    // Logged when new owner accepts ownership
     event ChangedOwner(address indexed _from, address indexed _to);
+    
+    // Logged when owner initiates a change of ownership
     event ChangeOwnerTo(address indexed _to);
+    
+    // Logged when ICO ether funds are transferred to an address
     event FundsTransferred(address indexed _wallet, uint indexed _value);
 
     // This fuse blows upon calling abort() which forces a fail state
@@ -304,14 +330,17 @@ contract ZCSTokenAbstract
     
     // Set to true after the fund is swept to the fund wallet, allows token
     // transfers and prevents abort()
-    bool public icoSuccessful;
+    bool public icoSucceeded;
     
     // Is set to open migration of ZCS tokens to the NRG contract
-    bool public mustMigrate;
+    bool public canMigrate;
 
     // Token conversion factors are calculated with decimal places at parity with ether
     uint8 public constant decimals = 18;
 
+    // The NRG contract address must be confirmed after being set
+    bool public nrgConfirmed;
+    
     // An address authorised to take ownership
     address public newOwner;
     
@@ -390,7 +419,8 @@ contract ZCSToken is
     uint public constant MIN_ETH_FUND   = 1 ether * MIN_USD_FUND / USD_PER_ETH;
     uint public constant MAX_ETH_FUND   = 1 ether * MAX_USD_FUND / USD_PER_ETH;
 
-    // General funding opens LEAD_IN_PERIOD after deployment (timestamps can't be constant)
+    // Not using constant to avoid potential 'not compile time constant'
+    // timestamp bugs
     uint public END_DATE  = START_DATE + FUNDING_PERIOD;
 
 //
@@ -415,6 +445,7 @@ contract ZCSToken is
         require(bytes(name).length > 0);
         require(owner != 0x0);
         require(fundWallet != 0x0);
+        require(devWallet != 0x0);
         require(ZCS_PER_USD > 0);
         require(USD_PER_ETH > 0);
         require(MIN_USD_FUND > 0);
@@ -487,7 +518,7 @@ contract ZCSToken is
         onlyOwner
         returns (bool)
     {
-        require(!icoSuccessful);
+        require(!icoSucceeded);
         delete __abortFuse;
         return true;
     }
@@ -499,7 +530,7 @@ contract ZCSToken is
         returns (bool)
     {
         require(!fundFailed());
-        require(!icoSuccessful);
+        require(!icoSucceeded);
         require(now <= END_DATE);
         require(msg.value > 0);
         
@@ -525,6 +556,8 @@ contract ZCSToken is
     
     // Owner can sweep a successful funding to the fundWallet
     // Contract can be aborted up until this action.
+    // Effective once but can be called multiple time to withdraw edge case
+    // funds recieved by contract which can selfdestruct to this address
     function finaliseICO()
         public
         onlyOwner
@@ -533,7 +566,7 @@ contract ZCSToken is
     {
         require(fundSucceeded());
 
-        icoSuccessful = true;
+        icoSucceeded = true;
 
         // Send commision to developer wallet
         FundsTransferred(devWallet, this.balance / COMMISION_DIV);
@@ -581,11 +614,11 @@ contract ZCSToken is
         returns (bool)
     {
         // ICO must be successful
-        require(icoSuccessful);
+        require(icoSucceeded);
         super.transfer(_to, _amount);
 
         if (_to == nrgContract)
-            require(mustMigrate);
+            require(canMigrate);
             require(ERC20Token(nrgContract).transfer(msg.sender, _amount));
         return true;
     }
@@ -596,11 +629,11 @@ contract ZCSToken is
         returns (bool)
     {
         // ICO must be successful
-        require(icoSuccessful);
+        require(icoSucceeded);
         super.transferFrom(_from, _to, _amount);
 
         if (_to == nrgContract)
-            require(mustMigrate);
+            require(canMigrate);
             require(ERC20Token(nrgContract).transfer(_from, _amount));
         return true;
     }
@@ -611,7 +644,7 @@ contract ZCSToken is
         returns (bool)
     {
         // ICO must be successful
-        require(icoSuccessful);
+        require(icoSucceeded);
         super.approve(_spender, _amount);
         return true;
     }
@@ -644,29 +677,31 @@ contract ZCSToken is
         return true;
     }
 
-    // Change the address of the Veredictum contract address. The contract
-    // must impliment the `Notify` interface.
+    // Set the address of the NRG contract.
+    // Cannot be changed after canMigrate has been set to true.
     function setNrgContract(address _kAddr)
         public
         noReentry
         onlyOwner
         returns (bool)
     {
+        require(!canMigrate);
         nrgContract = _kAddr;
         return true;
     }
 
-// TODO: need token shutdown strategy which does not lock tokens in exchanges  
-    // NRG contract opens migration when it's ICO is finalized.
-    // If NRG ICO fails, ZCS tokens remain indefinately transferrable
-    // speculation zombies.
+    // NRG contract opens migration when its ICO is finalized.
+    // If NRG ICO fails, setNrgContract() can be changed for a future funding
+    // attempts
     function setMigrate()
         public
         noReentry
         returns (bool)
     {
         require(msg.sender == nrgContract);
-        mustMigrate = true;
+        require(icoSucceeded);
+        
+        canMigrate = true;
         return true;
     }
     
@@ -688,16 +723,28 @@ contract ZCSToken is
         preventReentry
         returns (bool) 
     {
+        // cannot transfer NRG tokens
+        require(_kAddr != nrgContract);
         require(ERC20Token(_kAddr).transfer(_to, _amount));
         return true;
     }
 }
 
 
-
 // To test intercontract ZCS to NRG token migration/conversion
 contract NRGTestRig is ERC20Token
 {
+    bool public icoSucceeded;
+    uint public constant decimals = 18;
+    
+    uint public totalSupply = 5000000000 * 10**decimals;
+
+    // NRG Per USD
+    uint public constant NRG_PER_USD = 667;
+    
+    // TODO: Needs to be hard coded parameter in production contract
+    address public zcsContract;
+
 //
 // Events
 //
@@ -707,34 +754,31 @@ contract NRGTestRig is ERC20Token
         address indexed _to,
         uint indexed _amount);
     
-    uint public totalSupply = 5000000000 * 1e18;
-    
-    // NRG Per USD
-    uint public constant NRG_PER_USD = 667;
-    
-    // TODO: Use oracle to get rate for production contract
-    uint public rate = 30000;
-
-    // TODO: Needs to be hard coded parameter in production contract
-    address public zcsAddr;
-    
     // TODO: zcsAddr needs to be hard coded parameter
-    function NRGTestRig(address _zcsAddr)
+    function NRGTestRig(address _zcsContract)
     {
-        zcsAddr = ERC20Token(_zcsAddr);
-        uint zcsSupply = ERC20Token(zcsAddr).totalSupply();
-        totalSupply = 5000000000 * 1e18;
-        balances[zcsAddr] = zcsSupply;
+        zcsContract = _zcsContract;
+        // Cannot deploy until ZCS ICO has succeeded
+        require(ZCSToken(zcsContract).icoSucceeded());
+
+        // Load up the ZCS address with NRG balance = ZCSToken.totalSupply()
+        uint zcsSupply = ZCSToken(zcsContract).totalSupply();
+        balances[zcsContract] = zcsSupply;
         Transfer(0x0, this, totalSupply);
 
         balances[this] = totalSupply - zcsSupply;
         Transfer(0x0, this, totalSupply - zcsSupply);
     }
-    
+
     // Opens migration of tokens to NRG contract tokens
     function finalizeICO() public returns (bool)
     {
-        return ZCSTokenAbstract(zcsAddr).setMigrate();
+        require(!icoSucceeded);
+        icoSucceeded = true;
+        // ZCSToken.setNRG(<NRG address>) must first be called in ZCScontract
+        // else NRG cannot be finalized
+        require(ZCSToken(zcsContract).setMigrate());
+        return true;
     }
     
 //
@@ -748,8 +792,8 @@ contract NRGTestRig is ERC20Token
         // avoid wasting gas on 0 token transfers
         if(_amount == 0) return true;
         
-        if (msg.sender == zcsAddr)
-            MigratedFrom(zcsAddr, _to, _amount);
+        if (msg.sender == zcsContract)
+            MigratedFrom(zcsContract, _to, _amount);
         // Normal transfer
         require(_amount <= balances[_from]);
         balances[_from] = balances[_from].sub(_amount);
