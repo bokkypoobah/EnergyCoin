@@ -1,32 +1,45 @@
 /*
 file:   ZeroCarbonSeed.sol
-ver:    0.2.1
+ver:    0.2.2
 author: Darryl Morris
-date:   22-Sep-2017
+date:   23-Sep-2017
 email:  o0ragman0o AT gmail.com
 (c) Darryl Morris 2017
 
 A collated contract set for a token prefund specific to the requirments of
 Beond's ZeroCarbon green energy subsidy token.
 
-This presale token (ZCS) pegs generated tokens against  USD at a rate of
-2000ZCS/$1  ($0.0005/NRG)
+This presale token (ZCS) pegs minted tokens against USD at a rate of
+2000ZCS/$1  ($0.0005/NRG) where the ETH/USD echange rate is static and set at
+the time of deployment.
 
-Upon a successful NRG token ICO, ZCS token transfers are halted and tokens can
-only be migrated to the ZCS contract via an intercontract token transfer
-mechanism.
+The owner can finalize the ICO any time after the minimum funding cap has been
+reached.
 
-This software is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
-See MIT Licence for further details.
-<https://opensource.org/licenses/MIT>.
+The owner can abort the contract any time before a successful call to
+`finalizeICO()`
 
-Release Notes
--------------
-0.2.1
+Upon a successful NRG token ICO, ZCS tokens will be transferable to NRG tokens
+at a 1:1 rate by the holder calling `transfer(<NRG contract address>,<amount>)`
 
-* Proofed out migration protocol
+No premint, postmint, bonus or reserve tokens will be awarded and all tokens are
+created by direct funding during the ICO funding phase.
+
+Tokens become transferrable upon a successful call by the owner to
+`finalizeICO()`.
+ZCS tokens remain transferrable indefinitly until transferred to the NRG
+contract address whereupon the owner recieves NRG tokens of the same amount in
+the NRG contract.
+
+Investors can claim a full refund if the ICO fails to raise minimum funds by the
+end date or if the owner calls `abort()`
+
+The trust/risk relationship between investors and the owner of a successful ZCS
+ICO is that the owner must provide a viable NRG production contract address in
+the future.
+
+This contract guarantees that ZCS tokens will transfer to NRG tokens only on the
+condition that the NRG contract is viable and its ICO successful.
 
 Migration process
 -----------------
@@ -37,13 +50,10 @@ Migration process
 4. Audit that ZCSToken.nrgContract() is equal to actual NRGToken address
 5. NRGToken.finalizeICO() is called by owner after fundSucceeded == true
 5.1 NRGToken.finalizeICO() calls ZCSToken.setMigrate()
-6. Holders call ZCSToken.transfer(<nrgContract>, amount)
-6.1 ZCSToken.transfer() calls NRGToken.transfer(<holderAddr>, amount)
+6. Holders call ZCSToken.transfer(<nrgContract>, <amount>)
+6.1 ZCSToken.transfer() calls NRGToken.transfer(<holderAddr>, <amount>)
 8. Holders check NRGToken.balanceOf(<holderAddr>) to confirm migration
 
-Trust Relationship
-------------------
-* Holders must trust owner to provide and set a viable NRG contract address
 
 Timeline
 --------
@@ -51,23 +61,34 @@ Timeline
 |
 |
 |
-+-+- 1 Close <=21 days after open || minted <= $500,000USD
-| +- Funds to round 1 fund wallet
-| +- 1% to commision wallet
++-+- Close <=21 days after open || $250,000 <= minted <= $500,000
+| +- 1% of funds transferred to commision wallet
+| +- 99% Funds transferred to round ZCS fund wallet
 |
-+-+- Round 2. NRG Production token. Opens TBD 2018. 667 tokens / USD
-| +- mint 10,000,000 tokens to Beond wallets
-|
-|
-+-+- Round 2 Close 6th February 2018 || minted <= 4,000,000
-| +- Funds to round 2 fund wallet
-| +- 1% to commission wallet
-| +- Open trading
-| +- Migrate ZCS tokens at 1:1
-|
-+--- < 4 years 4x coin mint / MWh
-|
-+--- > 4 years 1x coin minted / MWh
+... NRG ICO TBD
+
+
+Release Notes
+-------------
+0.2.2
+
+* fixed edge case DOS posibility where attacker could block `destroy()` by
+selfdestructing funds to the contract. Now tests against `refunded==etherRaised`
+rather than `balance.this==0`
+* Redeclared `refund(address _addr)` to `refund()`
+* Declared `refundFor(address _addr)`
+* Removed overloaded near identical Transfer/TransferFrom (which had a critical
+scoping failure introduced in 0.2.1)
+* Overloaded `xfer()` instead with migration logic.
+* removed `nrgConfirmed` (using `canMigrate` flag instead)
+
+License
+-------
+This software is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
+See MIT Licence for further details.
+<https://opensource.org/licenses/MIT>.
 
 */
 
@@ -76,7 +97,7 @@ pragma solidity 0.4.13;
 
 /*-----------------------------------------------------------------------------\
 
- Ventana token sale configuration
+Zero Carbon Seed token sale configuration
 
 \*----------------------------------------------------------------------------*/
 
@@ -294,11 +315,12 @@ Reentry mutex set in moveFundsToWallet(), refund()
 
 |function                |<START_DATE|<END_DATE |fundFailed  |fundSucceeded|icoSucceeded
 |------------------------|:---------:|:--------:|:----------:|:-----------:|:---------:|
-|()                      |KYC        |T         |F           |T            |F          |
+|()                      |T          |T         |F           |T            |F          |
 |abort()                 |T          |T         |T           |T            |F          |
-|proxyPurchase()         |KYC        |T         |F           |T            |F          |
+|proxyPurchase()         |T          |T         |F           |T            |F          |
 |finaliseICO()           |F          |F         |F           |T            |T          |
 |refund()                |F          |F         |T           |F            |F          |
+|refundFor()             |F          |F         |T           |F            |F          |
 |transfer()              |F          |F         |F           |F            |T          |
 |transferFrom()          |F          |F         |F           |F            |T          |
 |approve()               |F          |F         |F           |F            |T          |
@@ -314,7 +336,7 @@ Reentry mutex set in moveFundsToWallet(), refund()
 contract ZCSTokenAbstract
 {
     // Logged upon refund
-    event Refunded(address indexed _addr, uint indexed _value);
+    event Refunded(address indexed _addr, uint _value);
     
     // Logged when new owner accepts ownership
     event ChangedOwner(address indexed _from, address indexed _to);
@@ -338,9 +360,6 @@ contract ZCSTokenAbstract
     // Token conversion factors are calculated with decimal places at parity with ether
     uint8 public constant decimals = 18;
 
-    // The NRG contract address must be confirmed after being set
-    bool public nrgConfirmed;
-    
     // An address authorised to take ownership
     address public newOwner;
     
@@ -349,6 +368,9 @@ contract ZCSTokenAbstract
     
     // Total ether raised during funding
     uint public etherRaised;
+    
+    // Total ether refunded.
+    uint public refunded;
     
     // Record of ether paid per address
     mapping (address => uint) public etherContributed;
@@ -378,8 +400,11 @@ contract ZCSTokenAbstract
     // Owner can move funds of successful fund to fundWallet 
     function finaliseICO() public returns (bool);
     
-    // Refund on failed or aborted sale 
-    function refund(address _addr) public returns (bool);
+    // Refund caller on failed or aborted sale 
+    function refund() public returns (bool);
+
+    // Refund a specified address on failed or aborted sale 
+    function refundFor(address _addr) public returns (bool);
 
     // To cancel token sale prior to START_DATE
     function abort() public returns (bool);
@@ -580,7 +605,16 @@ contract ZCSToken is
     }
     
     // Refunds can be claimed from a failed ICO
-    function refund(address _addr)
+    function refund()
+        public
+        noReentry
+        returns (bool)
+    {
+        return refundFor(msg.sender);
+    }
+    
+    // To refund a specified address from a failed ICO
+    function refundFor(address _addr)
         public
         preventReentry()
         returns (bool)
@@ -599,6 +633,7 @@ contract ZCSToken is
 
         Refunded(_addr, value);
         if (value > 0) {
+            refunded = refunded.add(value);
             _addr.transfer(value);
         }
         return true;
@@ -608,36 +643,21 @@ contract ZCSToken is
 // ERC20 overloaded functions
 //
 
-    function transfer(address _to, uint _amount)
-        public
-        preventReentry
+    // Process a transfer internally.
+    function xfer(address _from, address _to, uint _amount)
+        internal
         returns (bool)
     {
-        // ICO must be successful
         require(icoSucceeded);
-        super.transfer(_to, _amount);
+        super.xfer(_from, _to, _amount);
 
-        if (_to == nrgContract)
-            require(canMigrate);
-            require(ERC20Token(nrgContract).transfer(msg.sender, _amount));
-        return true;
-    }
-
-    function transferFrom(address _from, address _to, uint _amount)
-        public
-        preventReentry
-        returns (bool)
-    {
-        // ICO must be successful
-        require(icoSucceeded);
-        super.transferFrom(_from, _to, _amount);
-
-        if (_to == nrgContract)
+        if (_to == nrgContract) {
             require(canMigrate);
             require(ERC20Token(nrgContract).transfer(_from, _amount));
+        }
         return true;
     }
-    
+
     function approve(address _spender, uint _amount)
         public
         noReentry
@@ -712,7 +732,7 @@ contract ZCSToken is
         onlyOwner
     {
         require(!__abortFuse);
-        require(this.balance == 0);
+        require(refunded == etherRaised);
         selfdestruct(owner);
     }
     
