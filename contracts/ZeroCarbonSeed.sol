@@ -1,8 +1,8 @@
 /*
 file:   ZeroCarbonSeed.sol
-ver:    0.2.2
+ver:    0.2.4
 author: Darryl Morris
-date:   23-Sep-2017
+date:   4-Oct-2017
 email:  o0ragman0o AT gmail.com
 (c) Darryl Morris 2017
 
@@ -22,8 +22,9 @@ The owner can abort the contract any time before a successful call to
 Upon a successful NRG token ICO, ZCS tokens will be transferable to NRG tokens
 at a 1:1 rate by the holder calling `transfer(<NRG contract address>,<amount>)`
 
-No premint, postmint, bonus or reserve tokens will be awarded and all tokens are
-created by direct funding during the ICO funding phase.
+Beond will be preminted 6,500,000,000 ZCS tokens which will seed the NRG
+ecosystem.  All other tokens are created by direct funding during the ICO
+funding phase.
 
 Tokens become transferrable upon a successful call by the owner to
 `finalizeICO()`.
@@ -70,17 +71,11 @@ Timeline
 
 Release Notes
 -------------
-0.2.2
+0.2.4
 
-* fixed edge case DOS posibility where attacker could block `destroy()` by
-selfdestructing funds to the contract. Now tests against `refunded==etherRaised`
-rather than `balance.this==0`
-* Redeclared `refund(address _addr)` to `refund()`
-* Declared `refundFor(address _addr)`
-* Removed overloaded near identical Transfer/TransferFrom (which had a critical
-scoping failure introduced in 0.2.1)
-* Overloaded `xfer()` instead with migration logic.
-* removed `nrgConfirmed` (using `canMigrate` flag instead)
+* Added post funding KYC limit and managment
+* Added developer wallet address
+* To be used for audit training by Bokky's group
 
 License
 -------
@@ -115,21 +110,17 @@ contract ZCSTokenConfig
     // Fund wallet should also be audited prior to deployment
     // NOTE: Must be checksummed address!
     address public          fundWallet      = msg.sender;
-    // ICO developer commision wallet (1% of funds raised)
-    address public          devWallet       = msg.sender; // 0x0;
     
-    // Developer commision divisor (1% of funds raised);
-    uint public constant    COMMISION_DIV   = 100;
-
     // ZCS per $1 USD at $0.0005/ZCS
     uint public constant    ZCS_PER_USD     = 2000;
     
     // USD/ETH Exchange Rate
     uint public constant    USD_PER_ETH     = 200; // $200
     
-    // USD min and max caps
+    // USD min, max caps and KYC limit
     uint public constant    MIN_USD_FUND    = 250000; // $250,000
     uint public constant    MAX_USD_FUND    = 500000; // $500,000
+    uint public constant    USD_KYC_LIMIT   = 10000; // $10,000
 
     // Funding begins on 14th August 2017
     // `+ new Date('14 August 2017 GMT+0')/1000`
@@ -139,7 +130,9 @@ contract ZCSTokenConfig
     // Period for fundraising
     uint public constant    FUNDING_PERIOD  = 21 days;
     
-    // TODO: Add premint addresses and balances
+    // Premint addresses and balances
+    address BEOND       = 0x54f9c5639A688006B7d03FfDB891d55479985B10;
+    uint    BEOND_NRG   = 6500000000;
 }
 
 
@@ -319,6 +312,7 @@ Reentry mutex set in moveFundsToWallet(), refund()
 |abort()                 |T          |T         |T           |T            |F          |
 |proxyPurchase()         |T          |T         |F           |T            |F          |
 |finaliseICO()           |F          |F         |F           |T            |T          |
+|clearKyc()              |T          |T         |T           |T            |T          |
 |refund()                |F          |F         |T           |F            |F          |
 |refundFor()             |F          |F         |T           |F            |F          |
 |transfer()              |F          |F         |F           |F            |T          |
@@ -335,6 +329,10 @@ Reentry mutex set in moveFundsToWallet(), refund()
 
 contract ZCSTokenAbstract
 {
+//
+// Events
+//
+
     // Logged upon refund
     event Refunded(address indexed _addr, uint _value);
     
@@ -346,6 +344,13 @@ contract ZCSTokenAbstract
     
     // Logged when ICO ether funds are transferred to an address
     event FundsTransferred(address indexed _wallet, uint indexed _value);
+    
+    // Logged when funder exceeds the KYC limit
+    event MustKyc(address indexed _addr, bool indexed _kyc);
+
+//
+// State Variables
+//
 
     // This fuse blows upon calling abort() which forces a fail state
     bool public __abortFuse = true;
@@ -374,6 +379,13 @@ contract ZCSTokenAbstract
     
     // Record of ether paid per address
     mapping (address => uint) public etherContributed;
+    
+    // KYC flags
+    mapping (address => bool) public mustKyc;
+
+//
+// Function Abstracts
+//
 
     // Return `true` if MIN_FUNDS were raised
     function fundSucceeded() public constant returns (bool);
@@ -399,6 +411,10 @@ contract ZCSTokenAbstract
 
     // Owner can move funds of successful fund to fundWallet 
     function finaliseICO() public returns (bool);
+    
+    // For owner to clear KYC flags on an array of addresses to and allow token
+    // transfers
+    function clearKyc(address[] _addr) public returns (bool);
     
     // Refund caller on failed or aborted sale 
     function refund() public returns (bool);
@@ -440,9 +456,17 @@ contract ZCSToken is
 // Constants
 //
 
+    uint public constant TOKEN          = uint(10) ** decimals;
     uint public constant TOKENS_PER_ETH = ZCS_PER_USD * USD_PER_ETH;
     uint public constant MIN_ETH_FUND   = 1 ether * MIN_USD_FUND / USD_PER_ETH;
     uint public constant MAX_ETH_FUND   = 1 ether * MAX_USD_FUND / USD_PER_ETH;
+    uint public constant ETH_KYC_LIMIT  = 1 ether * USD_KYC_LIMIT / USD_PER_ETH;
+
+    // Developer commision divisor (1% of funds raised);
+    uint public constant    COMMISION_DIV   = 100;
+
+    // ICO developer commision wallet (1% of funds raised)
+    address public constant devWallet = 0x9E49015c8e7C480c4d0645b5dF5951905B4247BF;
 
     // Not using constant to avoid potential 'not compile time constant'
     // timestamp bugs
@@ -477,6 +501,11 @@ contract ZCSToken is
         require(MAX_USD_FUND > MIN_USD_FUND);
         require(START_DATE > 0);
         require(FUNDING_PERIOD > 0);
+        
+        // Assign and calculate premint
+        balances[BEOND] = BEOND_NRG * TOKEN;
+        
+        totalSupply = BEOND_NRG * TOKEN;
     }
     
     // Default function
@@ -570,6 +599,12 @@ contract ZCSToken is
         // Update holder payments
         etherContributed[_addr] = etherContributed[_addr].add(msg.value);
         
+        // Check KYC requirment
+        if (etherContributed[_addr] > ETH_KYC_LIMIT && !mustKyc[_addr]) {
+            mustKyc[_addr] = true;
+            MustKyc(_addr, true);
+        }
+        
         // Update funds raised
         etherRaised = etherRaised.add(msg.value);
         
@@ -604,6 +639,21 @@ contract ZCSToken is
         return true;
     }
     
+    // For owner to clear a KYC flag against an address and allow token transfer
+    function clearKyc(address[] _addrs)
+        public
+        onlyOwner
+        noReentry
+        returns (bool)
+    {
+        uint len = _addrs.length;
+        while (len-- > 0) {
+            mustKyc[_addrs[len]] = false;
+            MustKyc(_addrs[len], false);
+        }
+        return true;
+    }
+    
     // Refunds can be claimed from a failed ICO
     function refund()
         public
@@ -623,13 +673,15 @@ contract ZCSToken is
         
         uint value = etherContributed[_addr];
 
-        // Transfer tokens back to origin
-        // (Not really necessary but looking for graceful exit)
+        // Transfer tokens back to origin (burn)
         totalSupply = totalSupply.sub(balances[_addr]);
         xfer(_addr, 0x0, balances[_addr]);
 
         // garbage collect
         delete etherContributed[_addr];
+        if(mustKyc[_addr]) {
+            delete mustKyc[_addr];
+        }
 
         Refunded(_addr, value);
         if (value > 0) {
@@ -649,6 +701,8 @@ contract ZCSToken is
         returns (bool)
     {
         require(icoSucceeded);
+        require(!mustKyc[_from]);
+        
         super.xfer(_from, _to, _amount);
 
         if (_to == nrgContract) {
@@ -658,6 +712,7 @@ contract ZCSToken is
         return true;
     }
 
+    // Approves a third-party spender
     function approve(address _spender, uint _amount)
         public
         noReentry
@@ -665,6 +720,7 @@ contract ZCSToken is
     {
         // ICO must be successful
         require(icoSucceeded);
+        
         super.approve(_spender, _amount);
         return true;
     }
