@@ -503,9 +503,9 @@ contract ZCSToken is
         require(FUNDING_PERIOD > 0);
         
         // Assign and calculate premint
-        balances[BEOND] = BEOND_NRG * TOKEN;
-        
+        balances[BEOND] = BEOND_NRG * TOKEN;        
         totalSupply = BEOND_NRG * TOKEN;
+        Transfer(0x0, BEOND, BEOND_NRG * TOKEN);
     }
     
     // Default function
